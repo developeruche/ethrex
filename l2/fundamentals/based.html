@@ -246,7 +246,7 @@
   <span class="mdbook-alerts-icon"></span>
   important
 </p>
-<p>This documentation is about the current state of the <code>based</code> feature development and not about the final implementation. It is subject to change as the feature evolves and their still could be unmitigated issues.</p>
+<p>This documentation is about the current state of the <code>based</code> feature development and not about the final implementation. It is subject to change as the feature evolves and there still could be unmitigated issues.</p>
 </div>
 <div class="mdbook-alerts mdbook-alerts-note">
 <p class="mdbook-alerts-title">
@@ -328,10 +328,10 @@ The <code>commitBatch</code> method has been revised to improve data availabilit
 <li><strong>Event Modification:</strong>
 The <code>BatchCommitted</code> event has been updated to include the batch number of the committed batch. This addition enhances traceability and allows external systems to monitor batch progression more effectively.</li>
 <li><strong>Batch Verification:</strong>
-The <code>verifyBatch</code> method has been made more flexible and decentralized:
+The <code>verifyBatches</code> method has been made more flexible and decentralized:
 <ul>
-<li>The <code>onlySequencer</code> modifier has been removed, allowing anyone—not just the lead Sequencer—to verify batches.</li>
-<li>The restriction preventing multiple verifications of the same batch has been lifted. While multiple verifications are now permitted, only one valid verification is required to advance the L2 state. This change improves resilience and reduces dependency on a single actor.</li>
+<li>The method has no access control modifier, allowing anyone—not just the lead Sequencer—to verify batches.</li>
+<li>It supports verifying one or more consecutive batches in a single transaction. Only one valid verification is required to advance the L2 state. This change improves resilience and reduces dependency on a single actor.</li>
 </ul>
 </li>
 </ul>
@@ -585,7 +585,7 @@ TODO: add updated graph with L1 block time distribution
   <span class="mdbook-alerts-icon"></span>
   tip
 </p>
-<p>To enrich the understanding of this part, we suggest reading <a href="https://github.com/lambdaclass/ethrex/blob/main/docs/l2/overview.md">ethrex L2 High-Level docs</a> as this only details the diff with what we already have.</p>
+<p>To enrich the understanding of this part, we suggest reading <a href="https://github.com/lambdaclass/ethrex/blob/main/docs/l2/architecture/overview.md">ethrex L2 High-Level docs</a> as this only details the diff with what we already have.</p>
 </div>
 <ul>
 <li>Only lead Sequencer can post batches.</li>
@@ -598,7 +598,7 @@ TODO: add updated graph with L1 block time distribution
   <span class="mdbook-alerts-icon"></span>
   tip
 </p>
-<p>To enrich the understanding of this part, we suggest reading <a href="https://github.com/lambdaclass/ethrex/blob/main/docs/l2/overview.md">ethrex L2 High-Level docs</a> as this only details the diff with what we already have.</p>
+<p>To enrich the understanding of this part, we suggest reading <a href="https://github.com/lambdaclass/ethrex/blob/main/docs/l2/architecture/overview.md">ethrex L2 High-Level docs</a> as this only details the diff with what we already have.</p>
 </div>
 <ul>
 <li>Anyone can verify batches.</li>
@@ -679,7 +679,7 @@ TODO: add updated graph with L1 block time distribution
 <h3 id="based-rollups--extra-steps"><a class="header" href="#based-rollups--extra-steps">Based rollups + extra steps</a></h3>
 <ul>
 <li><a href="https://hackmd.io/@Perseverance/Syk2oQU36">Based Ticketing Rollup by George Spasov</a></li>
-<li><a href="https://docs.taiko.xyz/taiko-alethia-protocol/protocol-design/contestable-rollup">Based Contestable Rollup by Taiko (Taiko Alethia)</a></li>
+<li><a href="https://taiko.mirror.xyz/Z4I5ZhreGkyfdaL5I9P0Rj0DNX4zaWFmcws-0CVMJ2A">Based Contestable Rollup by Taiko (Taiko Alethia)</a></li>
 <li><a href="https://docs.taiko.xyz/taiko-gwyneth-protocol/what-is-taiko-gwyneth/">Native Based Rollup by Taiko (Taiko Gwyneth)</a></li>
 </ul>
 <h3 id="misc"><a class="header" href="#misc">Misc</a></h3>
