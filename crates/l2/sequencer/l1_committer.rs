@@ -558,7 +558,7 @@ impl L1Committer {
                 *fee_config_guard = *fee_config;
             }
 
-            one_time_checkpoint_blockchain.add_block_pipeline(block.clone(), None)?;
+            one_time_checkpoint_blockchain.add_block_pipeline(block.clone(), None, false)?;
         }
 
         Ok(())
@@ -855,7 +855,7 @@ impl L1Committer {
                     *fee_config_guard = fee_config;
                 }
 
-                checkpoint_blockchain.add_block_pipeline(potential_batch_block.clone(), None)?
+                checkpoint_blockchain.add_block_pipeline(potential_batch_block.clone(), None, false)?
             };
 
             // Accumulate block data with the rest of the batch.
@@ -1684,7 +1684,7 @@ pub async fn regenerate_state(
             *fee_config_guard = fee_config;
         }
 
-        if let Err(err) = blockchain.add_block_pipeline(block, None) {
+        if let Err(err) = blockchain.add_block_pipeline(block, None, false) {
             return Err(CommitterError::FailedToCreateCheckpoint(err.to_string()));
         }
     }

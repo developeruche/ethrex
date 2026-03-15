@@ -446,7 +446,7 @@ pub async fn process_blocks_on_queue(
         let block = Arc::unwrap_or_clone(block);
         established
             .blockchain
-            .add_block_pipeline(block, None)
+            .add_block_pipeline(block, None, false)
             .inspect_err(|e| {
                 error!(
                     peer=%established.node,

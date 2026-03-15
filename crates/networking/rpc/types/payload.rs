@@ -192,6 +192,8 @@ pub struct PayloadStatus {
     pub status: PayloadValidationStatus,
     pub latest_valid_hash: Option<H256>,
     pub validation_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -211,6 +213,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: Some(latest_valid_hash),
             validation_error: Some(error),
+            witness: None,
         }
     }
 
@@ -220,6 +223,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: None,
             validation_error: Some(error.to_string()),
+            witness: None,
         }
     }
 
@@ -229,6 +233,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: Some(hash),
             validation_error: None,
+            witness: None,
         }
     }
 
@@ -238,6 +243,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Syncing,
             latest_valid_hash: None,
             validation_error: None,
+            witness: None,
         }
     }
 
@@ -247,6 +253,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Valid,
             latest_valid_hash: Some(hash),
             validation_error: None,
+            witness: None,
         }
     }
     /// Creates a PayloadStatus with valid status and latest valid hash
@@ -255,6 +262,7 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Valid,
             latest_valid_hash: None,
             validation_error: None,
+            witness: None,
         }
     }
 }

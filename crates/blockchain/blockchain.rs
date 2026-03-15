@@ -388,6 +388,7 @@ impl Blockchain {
         parent_header: &BlockHeader,
         vm: &mut Evm,
         bal: Option<&BlockAccessList>,
+        compute_witness: bool,
     ) -> Result<BlockExecutionPipelineResult, ChainError> {
         let start_instant = Instant::now();
 
@@ -489,6 +490,7 @@ impl Blockchain {
                                 parent_header_ref,
                                 queue_length_ref,
                                 max_queue_length_ref,
+                                compute_witness,
                             )?
                         } else {
                             self.handle_merkleization(
@@ -497,6 +499,7 @@ impl Blockchain {
                                 parent_header_ref,
                                 queue_length_ref,
                                 max_queue_length_ref,
+                                compute_witness,
                             )?
                         };
                         let merkle_end_instant = Instant::now();
@@ -560,6 +563,7 @@ impl Blockchain {
         parent_header: &'b BlockHeader,
         queue_length: &AtomicUsize,
         max_queue_length: &mut usize,
+        compute_witness: bool,
     ) -> Result<(AccountUpdatesList, Option<Vec<AccountUpdate>>), StoreError>
     where
         'a: 's,
@@ -583,9 +587,9 @@ impl Blockchain {
         let mut code_updates: Vec<(H256, Code)> = vec![];
         let mut hashed_address_cache: FxHashMap<Address, H256> = Default::default();
 
-        // Accumulator for witness generation (only used if precompute_witnesses is true)
+        // Accumulator for witness generation (only used if precompute_witnesses or compute_witness is true)
         let mut accumulator: Option<FxHashMap<Address, AccountUpdate>> =
-            if self.options.precompute_witnesses {
+            if self.options.precompute_witnesses || compute_witness {
                 Some(FxHashMap::default())
             } else {
                 None
@@ -763,6 +767,7 @@ impl Blockchain {
         parent_header: &BlockHeader,
         queue_length: &AtomicUsize,
         max_queue_length: &mut usize,
+        compute_witness: bool,
     ) -> Result<(AccountUpdatesList, Option<Vec<AccountUpdate>>), StoreError> {
         const NUM_WORKERS: usize = 16;
         let parent_state_root = parent_header.state_root;
@@ -786,7 +791,7 @@ impl Blockchain {
         }
 
         // Extract witness accumulator before consuming updates
-        let accumulated_updates = if self.options.precompute_witnesses {
+        let accumulated_updates = if self.options.precompute_witnesses || compute_witness {
             Some(all_updates.values().cloned().collect::<Vec<_>>())
         } else {
             None
@@ -1929,8 +1934,9 @@ impl Blockchain {
         &self,
         block: Block,
         bal: Option<&BlockAccessList>,
-    ) -> Result<(), ChainError> {
-        let (_, result) = self.add_block_pipeline_inner(block, bal)?;
+        compute_witness: bool,
+    ) -> Result<Option<ExecutionWitness>, ChainError> {
+        let (_, result) = self.add_block_pipeline_inner(block, bal, compute_witness)?;
         result
     }
 
@@ -1940,10 +1946,11 @@ impl Blockchain {
         &self,
         block: Block,
         bal: Option<&BlockAccessList>,
-    ) -> Result<Option<BlockAccessList>, ChainError> {
-        let (produced_bal, result) = self.add_block_pipeline_inner(block, bal)?;
-        result?;
-        Ok(produced_bal)
+        compute_witness: bool,
+    ) -> Result<(Option<BlockAccessList>, Option<ExecutionWitness>), ChainError> {
+        let (produced_bal, result) = self.add_block_pipeline_inner(block, bal, compute_witness)?;
+        let witness = result?;
+        Ok((produced_bal, witness))
     }
 
     /// Runs the full block pipeline (execute + merkleize + store).
@@ -1957,7 +1964,8 @@ impl Blockchain {
         &self,
         block: Block,
         bal: Option<&BlockAccessList>,
-    ) -> Result<(Option<BlockAccessList>, Result<(), ChainError>), ChainError> {
+        compute_witness: bool,
+    ) -> Result<(Option<BlockAccessList>, Result<Option<ExecutionWitness>, ChainError>), ChainError> {
         // Validate if it can be the new head and find the parent
         let Ok(parent_header) = find_parent_header(&block.header, &self.storage) else {
             // If the parent is not present, we store it as pending.
@@ -1965,7 +1973,7 @@ impl Blockchain {
             return Err(ChainError::ParentNotFound);
         };
 
-        let (mut vm, logger) = if self.options.precompute_witnesses && self.is_synced() {
+        let (mut vm, logger) = if (self.options.precompute_witnesses || compute_witness) && self.is_synced() {
             // If witness pre-generation is enabled, we wrap the db with a logger
             // to track state access (block hashes, storage keys, codes) during execution
             // avoiding the need to re-execute the block later.
@@ -2003,7 +2011,7 @@ impl Blockchain {
             merkle_queue_length,
             instants,
             warmer_duration,
-        ) = { self.execute_block_pipeline(&block, &parent_header, &mut vm, bal)? };
+        ) = { self.execute_block_pipeline(&block, &parent_header, &mut vm, bal, compute_witness)? };
 
         let (gas_used, gas_limit, block_number, transactions_count) = (
             block.header.gas_used,
@@ -2011,6 +2019,8 @@ impl Blockchain {
             block.header.number,
             block.body.transactions.len(),
         );
+
+        let mut produced_witness = None;
 
         if let Some(logger) = logger
             && let Some(account_updates) = accumulated_updates
@@ -2022,11 +2032,13 @@ impl Blockchain {
                 parent_header,
                 &logger,
             )?;
+            
             self.storage
-                .store_witness(block_hash, block_number, witness)?;
+                .store_witness(block_hash, block_number, witness.clone())?;
+            produced_witness = Some(witness);
         };
 
-        let result = self.store_block(block, account_updates_list, res);
+        let result = self.store_block(block, account_updates_list, res).map(|_| produced_witness);
 
         let stored = Instant::now();
 

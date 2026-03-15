@@ -127,7 +127,7 @@ async fn run(
         let hash = block.hash();
 
         // Attempt to add the block as the head of the chain
-        let chain_result = blockchain.add_block_pipeline(block, None);
+        let chain_result = blockchain.add_block_pipeline(block, None, false);
 
         match chain_result {
             Err(error) => {
@@ -186,7 +186,7 @@ async fn run_two_pass_parallel(test_key: &str, test: &TestUnit) -> Result<(), St
         let hash = block.hash();
 
         let produced_bal = blockchain1
-            .add_block_pipeline_bal(block, None)
+            .add_block_pipeline_bal(block, None, false)
             .map_err(|e| format!("Two-pass pass-1 failed for test {test_key}: {e:?}"))?;
 
         apply_fork_choice(&store1, hash, hash, hash)
@@ -211,7 +211,7 @@ async fn run_two_pass_parallel(test_key: &str, test: &TestUnit) -> Result<(), St
         let hash = block.hash();
 
         blockchain2
-            .add_block_pipeline(block, Some(bal))
+            .add_block_pipeline(block, Some(bal), false)
             .map_err(|e| format!("Two-pass pass-2 (parallel) failed for test {test_key}: {e:?}"))?;
 
         apply_fork_choice(&store2, hash, hash, hash)

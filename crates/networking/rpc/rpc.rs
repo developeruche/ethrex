@@ -61,6 +61,7 @@ use ethrex_blockchain::Blockchain;
 use ethrex_blockchain::error::ChainError;
 use ethrex_common::types::Block;
 use ethrex_common::types::block_access_list::BlockAccessList;
+use ethrex_common::types::block_execution_witness::ExecutionWitness;
 use ethrex_metrics::rpc::{RpcOutcome, record_async_duration, record_rpc_outcome};
 use ethrex_p2p::peer_handler::PeerHandler;
 use ethrex_p2p::sync_manager::SyncManager;
@@ -176,9 +177,10 @@ pub enum RpcRequestWrapper {
 
 /// Channel message type for the block executor worker thread.
 type BlockWorkerMessage = (
-    oneshot::Sender<Result<(), ChainError>>,
+    oneshot::Sender<Result<Option<ExecutionWitness>, ChainError>>,
     Block,
     Option<BlockAccessList>,
+    bool,
 );
 
 /// This struct contains all the dependencies that RPC handlers need to process requests,
@@ -407,9 +409,9 @@ pub fn start_block_executor(blockchain: Arc<Blockchain>) -> UnboundedSender<Bloc
     std::thread::Builder::new()
         .name("block_executor".to_string())
         .spawn(move || {
-            while let Some((notify, block, bal)) = block_receiver.blocking_recv() {
+            while let Some((notify, block, bal, compute_witness)) = block_receiver.blocking_recv() {
                 let _ = notify
-                    .send(blockchain.add_block_pipeline(block, bal.as_ref()))
+                    .send(blockchain.add_block_pipeline(block, bal.as_ref(), compute_witness))
                     .inspect_err(|_| tracing::error!("failed to notify caller"));
             }
         })
