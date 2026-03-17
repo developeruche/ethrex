@@ -218,6 +218,7 @@ pub async fn init_rpc_api(
         get_http_socket_addr(opts),
         ws_socket_opts,
         get_authrpc_socket_addr(opts),
+        get_zkengine_socket_addr(opts),
         store,
         blockchain,
         read_jwtsecret_file(&opts.authrpc_jwtsecret),
@@ -404,6 +405,11 @@ pub fn get_local_node_record(
 pub fn get_authrpc_socket_addr(opts: &Options) -> SocketAddr {
     parse_socket_addr(&opts.authrpc_addr, &opts.authrpc_port)
         .expect("Failed to parse authrpc address and port")
+}
+
+pub fn get_zkengine_socket_addr(opts: &Options) -> SocketAddr {
+    parse_socket_addr(&opts.zkengine_addr, &opts.zkengine_port)
+        .expect("Failed to parse zkengine address and port")
 }
 
 pub fn get_http_socket_addr(opts: &Options) -> SocketAddr {

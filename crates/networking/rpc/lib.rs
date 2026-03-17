@@ -68,6 +68,8 @@ mod mempool;
 mod net;
 pub mod rpc;
 mod tracing;
+pub mod zkengine;
+
 
 pub mod clients;
 pub mod types;

@@ -16,26 +16,26 @@ use ethrex_common::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPayload {
-    parent_hash: H256,
-    fee_recipient: Address,
-    state_root: H256,
-    receipts_root: H256,
-    logs_bloom: Bloom,
-    prev_randao: H256,
+    pub parent_hash: H256,
+    pub fee_recipient: Address,
+    pub state_root: H256,
+    pub receipts_root: H256,
+    pub logs_bloom: Bloom,
+    pub prev_randao: H256,
     #[serde(with = "serde_utils::u64::hex_str")]
     pub block_number: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
-    gas_limit: u64,
+    pub gas_limit: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
-    gas_used: u64,
+    pub gas_used: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
     pub timestamp: u64,
     #[serde(with = "serde_utils::bytes")]
-    extra_data: Bytes,
+    pub extra_data: Bytes,
     #[serde(with = "serde_utils::u64::hex_str")]
-    base_fee_per_gas: u64,
+    pub base_fee_per_gas: u64,
     pub block_hash: H256,
-    transactions: Vec<EncodedTransaction>,
+    pub transactions: Vec<EncodedTransaction>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub withdrawals: Option<Vec<Withdrawal>>,
     // ExecutionPayloadV3 fields. Optional since we support V2 too

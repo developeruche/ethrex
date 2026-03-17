@@ -461,6 +461,7 @@ pub async fn start_api(
     http_addr: SocketAddr,
     ws_addr: Option<SocketAddr>,
     authrpc_addr: SocketAddr,
+    zkengine_addr: SocketAddr,
     storage: Store,
     blockchain: Arc<Blockchain>,
     jwt_secret: Bytes,
@@ -562,6 +563,15 @@ pub async fn start_api(
         .into_future();
     info!("Starting Auth-RPC server at {authrpc_addr}");
 
+    let zkengine_router = crate::zkengine::server::router(service_context.clone());
+    let zkengine_listener = TcpListener::bind(zkengine_addr)
+        .await
+        .map_err(|error| RpcErr::Internal(error.to_string()))?;
+    let zkengine_server = axum::serve(zkengine_listener, zkengine_router)
+        .with_graceful_shutdown(shutdown_signal())
+        .into_future();
+    info!("Starting zkengine REST server at {zkengine_addr}");
+
     if let Some(address) = ws_addr {
         let ws_handler = |ws: WebSocketUpgrade, ctx| async {
             ws.on_upgrade(|socket| handle_websocket(socket, ctx))
@@ -578,10 +588,10 @@ pub async fn start_api(
             .into_future();
         info!("Starting WS server at {address}");
 
-        let _ = tokio::try_join!(authrpc_server, http_server, ws_server)
+        let _ = tokio::try_join!(authrpc_server, http_server, ws_server, zkengine_server)
             .inspect_err(|e| error!("Error shutting down servers: {e:?}"));
     } else {
-        let _ = tokio::try_join!(authrpc_server, http_server)
+        let _ = tokio::try_join!(authrpc_server, http_server, zkengine_server)
             .inspect_err(|e| error!("Error shutting down servers: {e:?}"));
     }
 

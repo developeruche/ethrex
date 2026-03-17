@@ -59,6 +59,10 @@ participants:
     cl_image: lighthouse:local
     el_extra_params:
       - "--builder.gas-limit=720000000000"
+      - "--zkengine.addr=0.0.0.0"
+      - "--zkengine.port=8552"
+    cl_extra_params:
+      - "--zkengine-url=http://el-2-ethrex-lighthouse:8552"
     count: 1
 network_params:
   electra_fork_epoch: 0

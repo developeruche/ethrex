@@ -928,7 +928,7 @@ async fn handle_new_payload_v1_v2(
     Ok(payload_status)
 }
 
-async fn handle_new_payload_v3(
+pub(crate) async fn handle_new_payload_v3(
     payload: &ExecutionPayload,
     context: RpcApiContext,
     block: Block,
@@ -952,7 +952,7 @@ async fn handle_new_payload_v3(
     handle_new_payload_v1_v2(payload, block, context, bal).await
 }
 
-async fn handle_new_payload_v4(
+pub(crate) async fn handle_new_payload_v4(
     payload: &ExecutionPayload,
     context: RpcApiContext,
     block: Block,
@@ -984,7 +984,7 @@ fn validate_execution_requests(execution_requests: &[EncodedRequests]) -> Result
     Ok(())
 }
 
-fn get_block_from_payload(
+pub(crate) fn get_block_from_payload(
     payload: &ExecutionPayload,
     parent_beacon_block_root: Option<H256>,
     requests_hash: Option<H256>,
