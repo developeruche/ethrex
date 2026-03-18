@@ -23,6 +23,51 @@ use crate::{
     engine::payload::{get_block_from_payload, handle_new_payload_v3, handle_new_payload_v4},
 };
 
+fn encode_witness_to_ssz(witness: &ethrex_common::types::block_execution_witness::RpcExecutionWitness) -> Vec<u8> {
+    fn encode_list_of_bytes<T: AsRef<[u8]>>(list: &[T], out: &mut Vec<u8>) {
+        let n = list.len();
+        let mut offset = (n * 4) as u32;
+        // write offsets
+        for item in list {
+            out.extend_from_slice(&offset.to_le_bytes());
+            offset += item.as_ref().len() as u32;
+        }
+        // write data
+        for item in list {
+            out.extend_from_slice(item.as_ref());
+        }
+    }
+
+    fn size_of_list_of_bytes<T: AsRef<[u8]>>(list: &[T]) -> usize {
+        list.len() * 4 + list.iter().map(|b| b.as_ref().len()).sum::<usize>()
+    }
+
+    let state_size = size_of_list_of_bytes(&witness.state);
+    let keys_size = size_of_list_of_bytes(&witness.keys);
+    let codes_size = size_of_list_of_bytes(&witness.codes);
+    let headers_size = size_of_list_of_bytes(&witness.headers);
+
+    let total_size = 16 + state_size + keys_size + codes_size + headers_size;
+    let mut out = Vec::with_capacity(total_size);
+
+    let offset_state = 16u32;
+    let offset_keys = offset_state + state_size as u32;
+    let offset_codes = offset_keys + keys_size as u32;
+    let offset_headers = offset_codes + codes_size as u32;
+
+    out.extend_from_slice(&offset_state.to_le_bytes());
+    out.extend_from_slice(&offset_keys.to_le_bytes());
+    out.extend_from_slice(&offset_codes.to_le_bytes());
+    out.extend_from_slice(&offset_headers.to_le_bytes());
+
+    encode_list_of_bytes(&witness.state, &mut out);
+    encode_list_of_bytes(&witness.keys, &mut out);
+    encode_list_of_bytes(&witness.codes, &mut out);
+    encode_list_of_bytes(&witness.headers, &mut out);
+
+    out
+}
+
 use super::types::{
     SszPayloadRequestV3, SszPayloadRequestV4, SszPayloadResponse,
     SszExecutionPayloadV3, SszExecutionPayloadV4, MaxBytesPerTransaction,
@@ -34,8 +79,8 @@ pub fn router(context: RpcApiContext) -> Router {
     Router::new()
         .route("/new-payload-v3", post(handle_new_payload_v3_ssz))
         .route("/new-payload-v4", post(handle_new_payload_v4_ssz))
-        // 512MB limit for payloads
-        .layer(DefaultBodyLimit::max(512 * 1024 * 1024))
+        // 1GB limit for payloads
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(context)
 }
 
@@ -116,30 +161,12 @@ async fn handle_new_payload_v3_ssz(
     };
 
     let mut witness_bytes = VariableList::empty();
-    if let Some(w_val) = status.witness {
-        if let Some(hex_str) = w_val.as_str() {
-            let wit_conv_start = std::time::Instant::now();
-            match hex::decode(hex_str.trim_start_matches("0x")) {
-                Ok(json_bytes) => {
-                    match serde_json::from_slice::<ethrex_common::types::block_execution_witness::RpcExecutionWitness>(&json_bytes) {
-                        Ok(rpc_wit) => {
-                            let ssz_wit = SszRpcExecutionWitness {
-                                state: VariableList::try_from(rpc_wit.state.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                keys: VariableList::try_from(rpc_wit.keys.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                codes: VariableList::try_from(rpc_wit.codes.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                headers: VariableList::try_from(rpc_wit.headers.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                            };
-                            let encoded = ssz_wit.as_ssz_bytes();
-                            let wit_conv_dur = wit_conv_start.elapsed();
-                            info!("[WITNESS_BENCH] zkengine V3 Witness Serialization (JSON -> SSZ): {:?} | Size: {} bytes", wit_conv_dur, encoded.len());
-                            witness_bytes = VariableList::try_from(encoded).unwrap_or_default();
-                        }
-                        Err(e) => error!("[WITNESS_BENCH] zkengine V3 failed to deserialize RpcExecutionWitness from JSON: {:?}", e),
-                    }
-                }
-                Err(e) => error!("[WITNESS_BENCH] zkengine V3 failed to hex decode witness: {:?}", e),
-            }
-        }
+    if let Some(rpc_wit) = status.witness_raw {
+        let wit_enc_start = std::time::Instant::now();
+        let encoded = encode_witness_to_ssz(&rpc_wit);
+        let wit_enc_dur = wit_enc_start.elapsed();
+        info!("[WITNESS_BENCH] zkengine V3 Witness SSZ Encoding: {:?} | Size: {} bytes", wit_enc_dur, encoded.len());
+        witness_bytes = VariableList::try_from(encoded).unwrap_or_default();
     } else {
         debug!("[WITNESS_BENCH] zkengine V3: No witness in PayloadStatus (status: {:?})", status.status);
     }
@@ -252,30 +279,12 @@ async fn handle_new_payload_v4_ssz(
     };
 
     let mut witness_bytes = VariableList::empty();
-    if let Some(w_val) = status.witness {
-        if let Some(hex_str) = w_val.as_str() {
-            let wit_conv_start = std::time::Instant::now();
-            match hex::decode(hex_str.trim_start_matches("0x")) {
-                Ok(json_bytes) => {
-                    match serde_json::from_slice::<ethrex_common::types::block_execution_witness::RpcExecutionWitness>(&json_bytes) {
-                        Ok(rpc_wit) => {
-                            let ssz_wit = SszRpcExecutionWitness {
-                                state: VariableList::try_from(rpc_wit.state.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                keys: VariableList::try_from(rpc_wit.keys.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                codes: VariableList::try_from(rpc_wit.codes.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                                headers: VariableList::try_from(rpc_wit.headers.into_iter().map(|b| VariableList::try_from(b.to_vec()).unwrap()).collect::<Vec<_>>()).unwrap(),
-                            };
-                            let encoded = ssz_wit.as_ssz_bytes();
-                            let wit_conv_dur = wit_conv_start.elapsed();
-                            info!("[WITNESS_BENCH] zkengine V4 Witness Serialization (JSON -> SSZ): {:?} | Size: {} bytes", wit_conv_dur, encoded.len());
-                            witness_bytes = VariableList::try_from(encoded).unwrap_or_default();
-                        }
-                        Err(e) => error!("[WITNESS_BENCH] zkengine V4 failed to deserialize RpcExecutionWitness from JSON: {:?}", e),
-                    }
-                }
-                Err(e) => error!("[WITNESS_BENCH] zkengine V4 failed to hex decode witness: {:?}", e),
-            }
-        }
+    if let Some(rpc_wit) = status.witness_raw {
+        let wit_enc_start = std::time::Instant::now();
+        let encoded = encode_witness_to_ssz(&rpc_wit);
+        let wit_enc_dur = wit_enc_start.elapsed();
+        info!("[WITNESS_BENCH] zkengine V4 Witness SSZ Encoding: {:?} | Size: {} bytes", wit_enc_dur, encoded.len());
+        witness_bytes = VariableList::try_from(encoded).unwrap_or_default();
     } else {
         debug!("[WITNESS_BENCH] zkengine V4: No witness in PayloadStatus (status: {:?})", status.status);
     }

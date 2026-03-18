@@ -194,6 +194,8 @@ pub struct PayloadStatus {
     pub validation_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub witness_raw: Option<ethrex_common::types::block_execution_witness::RpcExecutionWitness>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -214,6 +216,7 @@ impl PayloadStatus {
             latest_valid_hash: Some(latest_valid_hash),
             validation_error: Some(error),
             witness: None,
+            witness_raw: None,
         }
     }
 
@@ -224,6 +227,7 @@ impl PayloadStatus {
             latest_valid_hash: None,
             validation_error: Some(error.to_string()),
             witness: None,
+            witness_raw: None,
         }
     }
 
@@ -234,6 +238,7 @@ impl PayloadStatus {
             latest_valid_hash: Some(hash),
             validation_error: None,
             witness: None,
+            witness_raw: None,
         }
     }
 
@@ -244,6 +249,7 @@ impl PayloadStatus {
             latest_valid_hash: None,
             validation_error: None,
             witness: None,
+            witness_raw: None,
         }
     }
 
@@ -254,6 +260,7 @@ impl PayloadStatus {
             latest_valid_hash: Some(hash),
             validation_error: None,
             witness: None,
+            witness_raw: None,
         }
     }
     /// Creates a PayloadStatus with valid status and latest valid hash
@@ -263,6 +270,7 @@ impl PayloadStatus {
             latest_valid_hash: None,
             validation_error: None,
             witness: None,
+            witness_raw: None,
         }
     }
 }

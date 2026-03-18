@@ -1114,6 +1114,7 @@ async fn try_execute_payload(
                 let rpc_witness =
                     ethrex_common::types::block_execution_witness::RpcExecutionWitness::try_from(witness)
                         .expect("Failed to convert witness to rpc witness");
+                payload_status.witness_raw = Some(rpc_witness.clone());
                 let encoded = serde_json::to_vec(&rpc_witness).expect("Failed to serialize witness");
                 let hex_str = format!("0x{}", hex::encode(encoded));
                 payload_status.witness = Some(serde_json::Value::String(hex_str));
