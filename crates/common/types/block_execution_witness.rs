@@ -91,7 +91,7 @@ pub struct ExecutionWitness {
 /// The trie nodes are pre-serialized (via `encode_subtrie`) to avoid
 /// expensive traversal on every RPC request.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RpcExecutionWitness {
+pub struct  RpcExecutionWitness {
     #[serde(
         serialize_with = "serde_utils::bytes::vec::serialize",
         deserialize_with = "serde_utils::bytes::vec::deserialize"

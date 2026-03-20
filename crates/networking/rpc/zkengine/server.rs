@@ -11,7 +11,7 @@ use ssz_types::VariableList;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::{info, error, debug};
-use ethrex_common::{H256, Address, U256, Bloom};
+use ethrex_common::{Address, Bloom, H256, U256, types::block_execution_witness::RpcExecutionWitness};
 use ethrex_common::types::Withdrawal;
 use ssz::Decode as SszDecode;
 use ssz::Encode as SszEncode;
@@ -68,10 +68,125 @@ fn encode_witness_to_ssz(witness: &ethrex_common::types::block_execution_witness
     out
 }
 
+pub fn decode_witness_from_ssz(data: &[u8]) -> Result<RpcExecutionWitness, String> {
+    fn decode_list_of_bytes(data: &[u8]) -> Result<Vec<bytes::Bytes>, String> {
+        if data.is_empty() {
+            return Ok(vec![]);
+        }
+        if data.len() < 4 {
+            return Err(format!("list too short to contain offset table: {} bytes", data.len()));
+        }
+
+        // Read first offset to determine how many items are in the list.
+        // The offset table occupies [0, first_offset) bytes.
+        // Each entry in the offset table is 4 bytes, so item count = first_offset / 4.
+        let first_offset = u32::from_le_bytes(
+            data[0..4].try_into().map_err(|_| "failed to read first offset")?
+        ) as usize;
+
+        if first_offset % 4 != 0 {
+            return Err(format!("first offset {} is not a multiple of 4", first_offset));
+        }
+        if first_offset > data.len() {
+            return Err(format!(
+                "first offset {} exceeds data length {}",
+                first_offset, data.len()
+            ));
+        }
+
+        let n = first_offset / 4;
+        if data.len() < n * 4 {
+            return Err(format!(
+                "data too short for offset table: need {} bytes, have {}",
+                n * 4, data.len()
+            ));
+        }
+
+        // Read all offsets
+        let mut offsets = Vec::with_capacity(n);
+        for i in 0..n {
+            let start = i * 4;
+            let offset = u32::from_le_bytes(
+                data[start..start + 4].try_into().map_err(|_| "failed to read offset")?
+            ) as usize;
+            offsets.push(offset);
+        }
+
+        // Decode each item using adjacent offsets to find boundaries
+        let mut items = Vec::with_capacity(n);
+        for i in 0..n {
+            let item_start = offsets[i];
+            let item_end = if i + 1 < n {
+                offsets[i + 1]
+            } else {
+                data.len()
+            };
+
+            if item_start > data.len() || item_end > data.len() || item_start > item_end {
+                return Err(format!(
+                    "invalid offset range [{}, {}) for data length {}",
+                    item_start, item_end, data.len()
+                ));
+            }
+
+            items.push(bytes::Bytes::copy_from_slice(&data[item_start..item_end]));
+        }
+
+        Ok(items)
+    }
+
+    // The outer structure has 4 fields, each variable-length.
+    // The outer offset table occupies the first 16 bytes (4 fields × 4 bytes each).
+    if data.len() < 16 {
+        return Err(format!(
+            "SSZ witness too short: need at least 16 bytes for outer offset table, got {}",
+            data.len()
+        ));
+    }
+
+    let offset_state = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let offset_keys   = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let offset_codes  = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+    let offset_headers = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+
+    // Validate outer offsets
+    if offset_state != 16 {
+        return Err(format!("expected state offset to be 16, got {}", offset_state));
+    }
+    for (name, offset) in [
+        ("keys",    offset_keys),
+        ("codes",   offset_codes),
+        ("headers", offset_headers),
+    ] {
+        if offset > data.len() {
+            return Err(format!(
+                "outer offset for {} ({}) exceeds data length ({})",
+                name, offset, data.len()
+            ));
+        }
+    }
+
+    // Slice each field's region using adjacent outer offsets
+    let state_bytes   = &data[offset_state..offset_keys];
+    let keys_bytes    = &data[offset_keys..offset_codes];
+    let codes_bytes   = &data[offset_codes..offset_headers];
+    let headers_bytes = &data[offset_headers..];
+
+    Ok(RpcExecutionWitness {
+        state:   decode_list_of_bytes(state_bytes)
+            .map_err(|e| format!("state: {}", e))?,
+        keys:    decode_list_of_bytes(keys_bytes)
+            .map_err(|e| format!("keys: {}", e))?,
+        codes:   decode_list_of_bytes(codes_bytes)
+            .map_err(|e| format!("codes: {}", e))?,
+        headers: decode_list_of_bytes(headers_bytes)
+            .map_err(|e| format!("headers: {}", e))?,
+    })
+}
+
 use super::types::{
     SszPayloadRequestV3, SszPayloadRequestV4, SszPayloadResponse,
-    SszExecutionPayloadV3, SszExecutionPayloadV4, MaxBytesPerTransaction,
-    SszRpcExecutionWitness
+    SszExecutionPayloadV3, SszExecutionPayloadV4
 };
 
 // Define zkengine router
@@ -162,6 +277,14 @@ async fn handle_new_payload_v3_ssz(
 
     let mut witness_bytes = VariableList::empty();
     if let Some(rpc_wit) = status.witness_raw {
+        // tracing::info!(
+        //         "[WITNESS_BENCH] zkengine Received Witness: State Length {},  Code Lenght: {}, Key Length: {}, Header Length: {} for block {}",
+        //         rpc_wit.state.len(),
+        //         rpc_wit.codes.len(),
+        //         rpc_wit.keys.len(),
+        //         rpc_wit.headers.len(),
+        //         payload.block_number
+        //     );
         let wit_enc_start = std::time::Instant::now();
         let encoded = encode_witness_to_ssz(&rpc_wit);
         let wit_enc_dur = wit_enc_start.elapsed();
@@ -280,6 +403,15 @@ async fn handle_new_payload_v4_ssz(
 
     let mut witness_bytes = VariableList::empty();
     if let Some(rpc_wit) = status.witness_raw {
+        // tracing::info!(
+        //         "[WITNESS_BENCH] zkengine Received Witness: State Length {},  Code Lenght: {}, Key Length: {}, Header Length: {} for block {}",
+        //         rpc_wit.state.len(),
+        //         rpc_wit.codes.len(),
+        //         rpc_wit.keys.len(),
+        //         rpc_wit.headers.len(),
+        //         payload.block_number
+        //     );
+
         let wit_enc_start = std::time::Instant::now();
         let encoded = encode_witness_to_ssz(&rpc_wit);
         let wit_enc_dur = wit_enc_start.elapsed();
@@ -312,4 +444,184 @@ async fn handle_new_payload_v4_ssz(
     info!("[WITNESS_BENCH] zkengine V4 Total Internal Time: {:?}", total_dur);
 
     Ok(Bytes::from(res.as_ssz_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+
+    fn make_witness(
+        state: Vec<Vec<u8>>,
+        keys: Vec<Vec<u8>>,
+        codes: Vec<Vec<u8>>,
+        headers: Vec<Vec<u8>>,
+    ) -> RpcExecutionWitness {
+        RpcExecutionWitness {
+            state:   state.into_iter().map(Bytes::from).collect(),
+            keys:    keys.into_iter().map(Bytes::from).collect(),
+            codes:   codes.into_iter().map(Bytes::from).collect(),
+            headers: headers.into_iter().map(Bytes::from).collect(),
+        }
+    }
+
+    fn assert_witness_eq(original: &RpcExecutionWitness, decoded: &RpcExecutionWitness) {
+        assert_eq!(original.state.len(),   decoded.state.len(),   "state length mismatch");
+        assert_eq!(original.keys.len(),    decoded.keys.len(),    "keys length mismatch");
+        assert_eq!(original.codes.len(),   decoded.codes.len(),   "codes length mismatch");
+        assert_eq!(original.headers.len(), decoded.headers.len(), "headers length mismatch");
+
+        for (i, (a, b)) in original.state.iter().zip(decoded.state.iter()).enumerate() {
+            assert_eq!(a, b, "state[{}] mismatch", i);
+        }
+        for (i, (a, b)) in original.keys.iter().zip(decoded.keys.iter()).enumerate() {
+            assert_eq!(a, b, "keys[{}] mismatch", i);
+        }
+        for (i, (a, b)) in original.codes.iter().zip(decoded.codes.iter()).enumerate() {
+            assert_eq!(a, b, "codes[{}] mismatch", i);
+        }
+        for (i, (a, b)) in original.headers.iter().zip(decoded.headers.iter()).enumerate() {
+            assert_eq!(a, b, "headers[{}] mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_typical() {
+        let witness = make_witness(
+            vec![vec![0x01, 0x02, 0x03], vec![0xde, 0xad, 0xbe, 0xef]],
+            vec![vec![0xaa; 32], vec![0xbb; 32]],
+            vec![vec![0x60, 0x60, 0x60, 0x40, 0x52]],
+            vec![vec![0xf8, 0x44]],
+        );
+
+        let encoded = encode_witness_to_ssz(&witness);
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+     #[test]
+    fn test_roundtrip_empty_witness() {
+        let witness = make_witness(vec![], vec![], vec![], vec![]);
+
+        let encoded = encode_witness_to_ssz(&witness);
+        assert_eq!(encoded.len(), 16, "empty witness should be exactly 16 bytes (outer offset table)");
+
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_some_fields_empty() {
+        let witness = make_witness(
+            vec![vec![0x01, 0x02], vec![0x03, 0x04]],
+            vec![],
+            vec![vec![0x60; 100]],
+            vec![],
+        );
+
+        let encoded = encode_witness_to_ssz(&witness);
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+       #[test]
+    fn test_roundtrip_single_item_each_field() {
+        let witness = make_witness(
+            vec![vec![0x11]],
+            vec![vec![0x22]],
+            vec![vec![0x33]],
+            vec![vec![0x44]],
+        );
+
+        let encoded = encode_witness_to_ssz(&witness);
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_variable_item_sizes() {
+        // items with very different sizes in the same field
+        let witness = make_witness(
+            vec![
+                vec![],                // empty item
+                vec![0x01],            // 1 byte
+                vec![0xff; 1000],      // 1KB
+                vec![0xab; 32],        // typical hash size
+            ],
+            vec![vec![0x00; 32]],
+            vec![vec![0x60; 24576]],   // typical contract bytecode size
+            vec![vec![0xf8; 508]],     // typical RLP block header
+        );
+
+        let encoded = encode_witness_to_ssz(&witness);
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_large_witness() {
+        // simulate a realistic witness with many trie nodes
+        let state: Vec<Vec<u8>> = (0..500)
+            .map(|i| {
+                let mut node = vec![0u8; 64 + (i % 400)];
+                node[0] = (i % 256) as u8;
+                node
+            })
+            .collect();
+
+        let keys: Vec<Vec<u8>> = (0..500)
+            .map(|_| vec![0xaa; 32])
+            .collect();
+
+        let codes: Vec<Vec<u8>> = (0..20)
+            .map(|i| vec![(i % 256) as u8; 1000 + i * 100])
+            .collect();
+
+        let headers: Vec<Vec<u8>> = (0..10)
+            .map(|_| vec![0xf8; 508])
+            .collect();
+
+        let witness = make_witness(state, keys, codes, headers);
+
+        let encoded = encode_witness_to_ssz(&witness);
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed on large witness");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+    #[test]
+    fn test_roundtrip_encoded_size_is_exact() {
+        let witness = make_witness(
+            vec![vec![0x01, 0x02, 0x03]],   
+            vec![vec![0x04, 0x05]],          
+            vec![vec![0x06]],                
+            vec![vec![0x07, 0x08, 0x09, 0x0a]], 
+        );
+
+        let encoded = encode_witness_to_ssz(&witness);
+        assert_eq!(encoded.len(), 42, "encoded size does not match expected");
+
+        let decoded = decode_witness_from_ssz(&encoded).expect("decode failed");
+        assert_witness_eq(&witness, &decoded);
+    }
+
+    #[test]
+    fn test_decode_rejects_truncated_input() {
+        let witness = make_witness(
+            vec![vec![0x01, 0x02]],
+            vec![vec![0x03]],
+            vec![vec![0x04]],
+            vec![vec![0x05]],
+        );
+        let encoded = encode_witness_to_ssz(&witness);
+
+        let result = decode_witness_from_ssz(&encoded[..8]);
+        assert!(result.is_err(), "should reject input shorter than 16 bytes");
+    }
+
+    #[test]
+    fn test_decode_rejects_empty_input() {
+        let result = decode_witness_from_ssz(&[]);
+        assert!(result.is_err(), "should reject empty input");
+    }
 }
