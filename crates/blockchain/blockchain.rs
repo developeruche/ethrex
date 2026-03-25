@@ -95,7 +95,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{Receiver, channel},
 };
@@ -191,6 +191,11 @@ pub struct Blockchain {
     /// Maps payload IDs to either completed payloads or in-progress build tasks.
     /// Kept around in case consensus requests the same payload twice.
     pub payloads: Arc<TokioMutex<Vec<(u64, PayloadOrTask)>>>,
+    /// Lock to ensure the previous block's background store completes before the
+    /// next block's execution begins. Held by the background store thread during
+    /// `store_witness` + `store_block`, and acquired at the start of the next
+    /// `add_block_pipeline_inner` call.
+    store_lock: Arc<Mutex<()>>,
 }
 
 /// Configuration options for the blockchain.
@@ -297,6 +302,7 @@ impl Blockchain {
             is_synced: AtomicBool::new(false),
             payloads: Arc::new(TokioMutex::new(Vec::new())),
             options: blockchain_opts,
+            store_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -307,6 +313,7 @@ impl Blockchain {
             is_synced: AtomicBool::new(false),
             payloads: Arc::new(TokioMutex::new(Vec::new())),
             options: BlockchainOptions::default(),
+            store_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -1893,6 +1900,30 @@ impl Blockchain {
             .map_err(|e| e.into())
     }
 
+    /// Static version of `store_block` for use from background threads that don't
+    /// hold a reference to `&self`.
+    fn store_block_static(
+        storage: &Store,
+        block: Block,
+        account_updates_list: AccountUpdatesList,
+        execution_result: BlockExecutionResult,
+    ) -> Result<(), ChainError> {
+        validate_state_root(&block.header, account_updates_list.state_trie_hash)?;
+
+        let update_batch = UpdateBatch {
+            account_updates: account_updates_list.state_updates,
+            storage_updates: account_updates_list.storage_updates,
+            receipts: vec![(block.hash(), execution_result.receipts)],
+            blocks: vec![block],
+            code_updates: account_updates_list.code_updates,
+            batch_mode: false,
+        };
+
+        storage
+            .store_block_updates(update_batch)
+            .map_err(|e| e.into())
+    }
+
     pub fn add_block(&self, block: Block) -> Result<(), ChainError> {
         let since = Instant::now();
         let (res, updates) = self.execute_block(&block)?;
@@ -1966,6 +1997,13 @@ impl Blockchain {
         bal: Option<&BlockAccessList>,
         compute_witness: bool,
     ) -> Result<(Option<BlockAccessList>, Result<Option<ExecutionWitness>, ChainError>), ChainError> {
+        // Wait for the previous block's background store to complete before
+        // starting execution. This ensures trie state is consistent.
+        let _prev_store = self.store_lock.lock().map_err(|_| {
+            ChainError::Custom("store_lock poisoned".to_string())
+        })?;
+        drop(_prev_store);
+
         // Validate if it can be the new head and find the parent
         let Ok(parent_header) = find_parent_header(&block.header, &self.storage) else {
             // If the parent is not present, we store it as pending.
@@ -2020,49 +2058,75 @@ impl Blockchain {
             block.body.transactions.len(),
         );
 
+        // Generate witness (on critical path — needed for the response)
         let mut produced_witness = None;
 
         if let Some(logger) = logger
             && let Some(account_updates) = accumulated_updates
         {
-            let block_hash = block.hash();
+
             let witness = self.generate_witness_from_account_updates(
                 account_updates,
                 &block,
                 parent_header,
                 &logger,
             )?;
-            
-            self.storage
-                .store_witness(block_hash, block_number, witness.clone())?;
             produced_witness = Some(witness);
         };
 
-        let result = self.store_block(block, account_updates_list, res).map(|_| produced_witness);
+        // Fire-and-forget: spawn store_witness + store_block in background.
+        // The store_lock is held by the background thread, so the next block's
+        // add_block_pipeline_inner will wait for this store to complete.
+        let store_lock = self.store_lock.clone();
+        let storage = self.storage.clone();
+        let perf_logs_enabled = self.options.perf_logs_enabled;
+        let produced_witness_clone = produced_witness.clone();
+        std::thread::spawn(move || {
+            // Acquire the store lock — held for the duration of store operations.
+            let _lock = store_lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        let stored = Instant::now();
+            // store_witness (only if witness was produced)
+            if let Some(ref witness) = produced_witness_clone {
+                let block_hash = block.hash();
+                if let Err(e) = storage.store_witness(block_hash, block_number, witness.clone()) {
+                    ::tracing::warn!("Background store_witness failed: {e}");
+                }
+            }
 
-        let instants = std::array::from_fn(move |i| {
-            if i < instants.len() {
-                instants[i]
-            } else {
-                stored
+            // store_block
+
+            if let Err(e) = Blockchain::store_block_static(
+                &storage,
+                block,
+                account_updates_list,
+                res,
+            ) {
+                ::tracing::error!("Background store_block failed: {e}");
+            }
+
+            let stored = Instant::now();
+
+            if perf_logs_enabled {
+                let instants = std::array::from_fn(move |i| {
+                    if i < instants.len() {
+                        instants[i]
+                    } else {
+                        stored
+                    }
+                });
+                Self::print_add_block_pipeline_logs(
+                    gas_used,
+                    gas_limit,
+                    block_number,
+                    transactions_count,
+                    merkle_queue_length,
+                    warmer_duration,
+                    instants,
+                );
             }
         });
 
-        if self.options.perf_logs_enabled {
-            Self::print_add_block_pipeline_logs(
-                gas_used,
-                gas_limit,
-                block_number,
-                transactions_count,
-                merkle_queue_length,
-                warmer_duration,
-                instants,
-            );
-        }
-
-        Ok((produced_bal, result))
+        Ok((produced_bal, Ok(produced_witness)))
     }
 
     #[allow(clippy::too_many_arguments)]
