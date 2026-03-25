@@ -1395,9 +1395,14 @@ impl Store {
             child_state_root: last_state_root,
             is_batch,
         };
+
+        let t0 = std::time::Instant::now();
         trie_upd_worker_tx.send(trie_update).map_err(|e| {
             StoreError::Custom(format!("failed to read new trie layer notification: {e}"))
         })?;
+        let send_elapsed = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
         let mut tx = db.begin_write()?;
 
         for block in update_batch.blocks {
@@ -1438,14 +1443,29 @@ impl Store {
             tx.put(ACCOUNT_CODES, code_hash.as_ref(), &buf)?;
             tx.put(ACCOUNT_CODE_METADATA, code_hash.as_ref(), &metadata_buf)?;
         }
+        let puts_elapsed = t1.elapsed();
 
         // Wait for an updated top layer so every caller afterwards sees a consistent view.
         // Specifically, the next block produced MUST see this upper layer.
+        let t2 = std::time::Instant::now();
         wait_for_new_layer
             .recv()
             .map_err(|e| StoreError::Custom(format!("recv failed: {e}")))??;
+        let recv_elapsed = t2.elapsed();
+
         // After top-level is added, we can make the rest of the changes visible.
+        let t3 = std::time::Instant::now();
         tx.commit()?;
+        let commit_elapsed = t3.elapsed();
+
+        info!(
+            "  [apply_updates] send: {:.2} ms | puts: {:.2} ms | recv_wait: {:.2} ms | commit: {:.2} ms | total: {:.2} ms",
+            send_elapsed.as_secs_f64() * 1000.0,
+            puts_elapsed.as_secs_f64() * 1000.0,
+            recv_elapsed.as_secs_f64() * 1000.0,
+            commit_elapsed.as_secs_f64() * 1000.0,
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
 
         Ok(())
     }

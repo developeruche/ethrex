@@ -2021,6 +2021,7 @@ impl Blockchain {
         );
 
         let mut produced_witness = None;
+        let witness_gen_start = Instant::now();
 
         if let Some(logger) = logger
             && let Some(account_updates) = accumulated_updates
@@ -2032,6 +2033,8 @@ impl Blockchain {
                 parent_header,
                 &logger,
             )?;
+
+            let witness_gen_elapsed = witness_gen_start.elapsed();
 
             // Persist witness in background — not needed for block execution correctness,
             // only for `debug_executionWitness` RPC lookups.
@@ -2045,9 +2048,18 @@ impl Blockchain {
                 }
             });
             produced_witness = Some(witness);
+
+            if self.options.perf_logs_enabled {
+                info!(
+                    "  [store breakdown] witness_gen: {:.2} ms",
+                    witness_gen_elapsed.as_secs_f64() * 1000.0
+                );
+            }
         };
 
+        let store_block_start = Instant::now();
         let result = self.store_block(block, account_updates_list, res).map(|_| produced_witness);
+        let store_block_elapsed = store_block_start.elapsed();
 
         let stored = Instant::now();
 
@@ -2068,6 +2080,10 @@ impl Blockchain {
                 merkle_queue_length,
                 warmer_duration,
                 instants,
+            );
+            info!(
+                "  [store breakdown] store_block: {:.2} ms",
+                store_block_elapsed.as_secs_f64() * 1000.0
             );
         }
 
