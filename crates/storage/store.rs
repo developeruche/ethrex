@@ -1395,9 +1395,14 @@ impl Store {
             child_state_root: last_state_root,
             is_batch,
         };
+
+        let t0 = std::time::Instant::now();
         trie_upd_worker_tx.send(trie_update).map_err(|e| {
             StoreError::Custom(format!("failed to read new trie layer notification: {e}"))
         })?;
+        let send_elapsed = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
         let mut tx = db.begin_write()?;
 
         for block in update_batch.blocks {
@@ -1438,14 +1443,29 @@ impl Store {
             tx.put(ACCOUNT_CODES, code_hash.as_ref(), &buf)?;
             tx.put(ACCOUNT_CODE_METADATA, code_hash.as_ref(), &metadata_buf)?;
         }
+        let puts_elapsed = t1.elapsed();
 
         // Wait for an updated top layer so every caller afterwards sees a consistent view.
         // Specifically, the next block produced MUST see this upper layer.
+        let t2 = std::time::Instant::now();
         wait_for_new_layer
             .recv()
             .map_err(|e| StoreError::Custom(format!("recv failed: {e}")))??;
+        let recv_elapsed = t2.elapsed();
+
         // After top-level is added, we can make the rest of the changes visible.
+        let t3 = std::time::Instant::now();
         tx.commit()?;
+        let commit_elapsed = t3.elapsed();
+
+        info!(
+            "  [apply_updates] send: {:.2} ms | puts: {:.2} ms | recv_wait: {:.2} ms | commit: {:.2} ms | total: {:.2} ms",
+            send_elapsed.as_secs_f64() * 1000.0,
+            puts_elapsed.as_secs_f64() * 1000.0,
+            recv_elapsed.as_secs_f64() * 1000.0,
+            commit_elapsed.as_secs_f64() * 1000.0,
+            t0.elapsed().as_secs_f64() * 1000.0,
+        );
 
         Ok(())
     }
@@ -1528,39 +1548,62 @@ impl Store {
         let backend = store.backend.clone();
         let flatkeyvalue_control_tx = store.flatkeyvalue_control_tx.clone();
         let trie_cache = store.trie_cache.clone();
+
+        // Channel for Phase 2 disk flush work. Capacity of 1 allows the Phase 1 thread
+        // to enqueue one pending flush without blocking, while providing backpressure
+        // if the disk thread falls two blocks behind.
+        let (disk_flush_tx, disk_flush_rx) =
+            std::sync::mpsc::sync_channel::<TrieDiskFlushWork>(1);
+
         /*
-            When a block is executed, the write of the bottom-most diff layer to disk is done in the background through this thread.
-            This is to improve block execution times, since it's not necessary when executing the next block to have this layer flushed to disk.
+            TRIE UPDATE ARCHITECTURE (two-thread design):
 
-            This background thread receives messages through a channel to apply new trie updates and does three things:
+            Thread 1 (trie_phase1_worker): Receives TrieUpdate messages, performs only the fast
+            in-memory diff-layer update (put_batch into FxHashMap + bloom filter), then signals
+            the block production thread to continue. Phase 2 work is forwarded to Thread 2.
+            This thread is never blocked by disk I/O, so send() from block production returns quickly.
 
-            - First, it updates the top-most in-memory diff layer and notifies the process that sent the message (i.e. the
-            block production thread) so it can continue with block execution (block execution cannot proceed without the
-            diff layers updated, otherwise it would see wrong state when reading from the trie). This section is done in an RCU manner:
-            a shared pointer with the trie is kept behind a lock. This thread first acquires the lock, then copies the pointer and drops the lock;
-            afterwards it makes a deep copy of the trie layer and mutates it, then takes the lock again, replaces the pointer with the updated copy,
-            then drops the lock again.
-
-            - Second, it performs the logic of persisting the bottom-most diff layer to disk. This is the part of the logic that block execution does not
-            need to proceed. What does need to be aware of this section is the process in charge of generating the snapshot (a.k.a. FlatKeyValue).
-            Because of this, this section first sends a message to pause the FlatKeyValue generation, then persists the diff layer to disk, then notifies
-            again for FlatKeyValue generation to continue.
-
-            - Third, it removes the (no longer needed) bottom-most diff layer from the trie layers in the same way as the first step.
+            Thread 2 (trie_disk_flush_worker): Receives Phase 2 work, persists the bottom-most
+            diff layer to disk, pausing/resuming the FlatKeyValue generator as needed, then
+            performs the RCU cleanup of the committed layers.
         */
+        let trie_cache_for_disk = trie_cache.clone();
+        let backend_for_disk = backend.clone();
+
+        // Thread 2: disk flush worker
+        background_threads.push(std::thread::spawn(move || {
+            let rx = disk_flush_rx;
+            loop {
+                match rx.recv() {
+                    Ok(work) => {
+                        let _ = apply_trie_disk_flush(
+                            backend_for_disk.as_ref(),
+                            &flatkeyvalue_control_tx,
+                            &trie_cache_for_disk,
+                            work,
+                        )
+                        .inspect_err(|err| error!("Trie disk flush failed: {err}"));
+                    }
+                    Err(err) => {
+                        debug!("Trie disk flush sender disconnected: {err}");
+                        return;
+                    }
+                }
+            }
+        }));
+
+        // Thread 1: fast in-memory trie update worker
         background_threads.push(std::thread::spawn(move || {
             let rx = trie_upd_rx;
             loop {
                 match rx.recv() {
                     Ok(trie_update) => {
-                        // FIXME: what should we do on error?
-                        let _ = apply_trie_updates(
-                            backend.as_ref(),
-                            &flatkeyvalue_control_tx,
+                        let _ = apply_trie_update_phase1(
                             &trie_cache,
                             trie_update,
+                            &disk_flush_tx,
                         )
-                        .inspect_err(|err| error!("apply_trie_updates failed: {err}"));
+                        .inspect_err(|err| error!("Trie Phase 1 update failed: {err}"));
                     }
                     Err(err) => {
                         debug!("Trie update sender disconnected: {err}");
@@ -2821,11 +2864,25 @@ struct TrieUpdate {
 
 // NOTE: we don't receive `Store` here to avoid cyclic dependencies
 // with the other end of `fkv_ctl`
-fn apply_trie_updates(
-    backend: &dyn StorageBackend,
-    fkv_ctl: &SyncSender<FKVGeneratorControlMessage>,
+/// Work item for the disk flush thread (Phase 2 of trie updates).
+struct TrieDiskFlushWork {
+    /// Snapshot of the trie cache after Phase 1 put_batch.
+    trie: Arc<TrieLayerCache>,
+    /// The parent state root of the block whose trie was updated.
+    parent_state_root: H256,
+    /// Whether this is a batch-mode commit (full sync).
+    is_batch: bool,
+}
+
+/// Phase 1 (fast path): update in-memory diff-layers only, then notify block production.
+///
+/// This function runs on the trie worker thread and must complete quickly so the
+/// zero-buffered channel is freed for the next block's `send()`. All slow disk I/O
+/// is forwarded to the disk flush thread via `disk_flush_tx`.
+fn apply_trie_update_phase1(
     trie_cache: &Arc<RwLock<Arc<TrieLayerCache>>>,
     trie_update: TrieUpdate,
+    disk_flush_tx: &SyncSender<TrieDiskFlushWork>,
 ) -> Result<(), StoreError> {
     let TrieUpdate {
         result_sender,
@@ -2836,7 +2893,7 @@ fn apply_trie_updates(
         is_batch,
     } = trie_update;
 
-    // Phase 1: update the in-memory diff-layers only, then notify block production.
+    // Flatten storage + account updates into a single batch.
     let new_layer = storage_updates
         .into_iter()
         .flat_map(|(account_hash, nodes)| {
@@ -2846,6 +2903,7 @@ fn apply_trie_updates(
         })
         .chain(account_updates)
         .collect();
+
     // Read-Copy-Update the trie cache with a new layer.
     let trie = trie_cache
         .read()
@@ -2855,12 +2913,40 @@ fn apply_trie_updates(
     trie_mut.put_batch(parent_state_root, child_state_root, new_layer);
     let trie = Arc::new(trie_mut);
     *trie_cache.write().map_err(|_| StoreError::LockError)? = trie.clone();
-    // Update finished, signal block processing.
+
+    // Update finished — signal block processing to continue.
     result_sender
         .send(Ok(()))
         .map_err(|_| StoreError::LockError)?;
 
-    // Phase 2: update disk layer.
+    // Forward Phase 2 work to the disk flush thread (non-blocking if capacity available).
+    let work = TrieDiskFlushWork {
+        trie,
+        parent_state_root,
+        is_batch,
+    };
+    disk_flush_tx
+        .send(work)
+        .map_err(|e| StoreError::Custom(format!("disk flush channel send failed: {e}")))?;
+
+    Ok(())
+}
+
+/// Phase 2 (slow path): persist the bottom-most diff layer to disk and clean up.
+///
+/// Runs on a dedicated disk flush thread, never blocking the Phase 1 trie worker.
+fn apply_trie_disk_flush(
+    backend: &dyn StorageBackend,
+    fkv_ctl: &SyncSender<FKVGeneratorControlMessage>,
+    trie_cache: &Arc<RwLock<Arc<TrieLayerCache>>>,
+    work: TrieDiskFlushWork,
+) -> Result<(), StoreError> {
+    let TrieDiskFlushWork {
+        trie,
+        parent_state_root,
+        is_batch,
+    } = work;
+
     let commitable = if is_batch {
         trie.get_commitable_with_threshold(parent_state_root, BATCH_COMMIT_THRESHOLD)
     } else {
@@ -2870,8 +2956,8 @@ fn apply_trie_updates(
         // Nothing to commit to disk, move on.
         return Ok(());
     };
+
     // Stop the flat-key-value generator thread, as the underlying trie is about to change.
-    // Ignore the error, if the channel is closed it means there is no worker to notify.
     let _ = fkv_ctl.send(FKVGeneratorControlMessage::Stop);
 
     // RCU to remove the bottom layer: update step needs to happen after disk layer is updated.
@@ -2883,9 +2969,6 @@ fn apply_trie_updates(
         .unwrap_or_default();
 
     let mut write_tx = backend.begin_write()?;
-
-    // Before encoding, accounts have only the account address as their path, while storage keys have
-    // the account address (32 bytes) + storage path (up to 32 bytes).
 
     // Commit removes the bottom layer and returns it, this is the mutation step.
     let nodes = trie_mut.commit(root).unwrap_or_default();
@@ -2923,6 +3006,7 @@ fn apply_trie_updates(
     // We want to send this message even if there was an error during the batch write
     let _ = fkv_ctl.send(FKVGeneratorControlMessage::Continue);
     result?;
+
     // Phase 3: update diff layers with the removal of bottom layer.
     *trie_cache.write().map_err(|_| StoreError::LockError)? = Arc::new(trie_mut);
     Ok(())
