@@ -2032,9 +2032,18 @@ impl Blockchain {
                 parent_header,
                 &logger,
             )?;
-            
-            self.storage
-                .store_witness(block_hash, block_number, witness.clone())?;
+
+            // Persist witness in background — not needed for block execution correctness,
+            // only for `debug_executionWitness` RPC lookups.
+            let storage_clone = self.storage.clone();
+            let witness_clone = witness.clone();
+            std::thread::spawn(move || {
+                if let Err(e) =
+                    storage_clone.store_witness(block_hash, block_number, witness_clone)
+                {
+                    warn!("Background store_witness failed: {e}");
+                }
+            });
             produced_witness = Some(witness);
         };
 
