@@ -66,7 +66,7 @@ use crossbeam::channel::{self as cb, TryRecvError, select};
 #[cfg(feature = "c-kzg")]
 use ethrex_common::types::EIP4844Transaction;
 use ethrex_common::types::block_access_list::BlockAccessList;
-use ethrex_common::types::block_execution_witness::ExecutionWitness;
+use ethrex_common::types::block_execution_witness::{ExecutionWitness, RpcExecutionWitness};
 use ethrex_common::types::fee_config::FeeConfig;
 use ethrex_common::types::{
     AccountInfo, AccountState, AccountUpdate, Block, BlockHash, BlockHeader, BlockNumber,
@@ -1789,7 +1789,18 @@ impl Blockchain {
         block: Block,
         bal: Option<&BlockAccessList>,
     ) -> Result<(), ChainError> {
-        let (_, result) = self.add_block_pipeline_inner(block, bal)?;
+        let (_, result) = self.add_block_pipeline_inner(block, bal, false)?;
+        result.map(|_| ())
+    }
+
+    /// Same as [`add_block_pipeline`] but also generates and returns an
+    /// `RpcExecutionWitness` alongside the `PayloadStatus`.
+    pub fn add_block_pipeline_with_witness(
+        &self,
+        block: Block,
+        bal: Option<&BlockAccessList>,
+    ) -> Result<Option<RpcExecutionWitness>, ChainError> {
+        let (_, result) = self.add_block_pipeline_inner(block, bal, true)?;
         result
     }
 
@@ -1800,7 +1811,7 @@ impl Blockchain {
         block: Block,
         bal: Option<&BlockAccessList>,
     ) -> Result<Option<BlockAccessList>, ChainError> {
-        let (produced_bal, result) = self.add_block_pipeline_inner(block, bal)?;
+        let (produced_bal, result) = self.add_block_pipeline_inner(block, bal, false)?;
         result?;
         Ok(produced_bal)
     }
@@ -1817,7 +1828,8 @@ impl Blockchain {
         &self,
         block: Block,
         bal: Option<&BlockAccessList>,
-    ) -> Result<(Option<BlockAccessList>, Result<(), ChainError>), ChainError> {
+        compute_witness: bool,
+    ) -> Result<(Option<BlockAccessList>, Result<Option<RpcExecutionWitness>, ChainError>), ChainError> {
         // Validate if it can be the new head and find the parent
         let Ok(parent_header) = find_parent_header(&block.header, &self.storage) else {
             // If the parent is not present, we store it as pending.
@@ -1825,7 +1837,7 @@ impl Blockchain {
             return Err(ChainError::ParentNotFound);
         };
 
-        let (mut vm, logger) = if self.options.precompute_witnesses && self.is_synced() {
+        let (mut vm, logger) = if (self.options.precompute_witnesses || compute_witness) && self.is_synced() {
             // If witness pre-generation is enabled, we wrap the db with a logger
             // to track state access (block hashes, storage keys, codes) during execution
             // avoiding the need to re-execute the block later.
@@ -1872,18 +1884,31 @@ impl Blockchain {
             block.body.transactions.len(),
         );
 
+        let mut produced_witness: Option<RpcExecutionWitness> = None;
+
         if let Some(logger) = logger
             && let Some(account_updates) = accumulated_updates
         {
-            let block_hash = block.hash();
             let witness = self.generate_witness_from_account_updates(
                 account_updates,
                 &block,
                 parent_header,
                 &logger,
             )?;
-            self.storage
-                .store_witness(block_hash, block_number, witness)?;
+
+            if compute_witness {
+                // Convert to RPC format for returning over the wire.
+                let rpc_witness = RpcExecutionWitness::try_from(witness)
+                    .map_err(|e| ChainError::Custom(format!("witness conversion failed: {e}")))?;
+                produced_witness = Some(rpc_witness);
+
+                //TODO:DEVELOPERUCHE: After seeing some data, Might persist to DB for later retrieval via debug_executionWitness.
+            } else {
+                // Persist to DB for later retrieval via debug_executionWitness.
+                let block_hash = block.hash();
+                self.storage
+                    .store_witness(block_hash, block_number, witness)?;
+            }
         };
 
         let result = self.store_block(block, account_updates_list, res);
@@ -1910,7 +1935,7 @@ impl Blockchain {
             );
         }
 
-        Ok((produced_bal, result))
+        Ok((produced_bal, result.map(|()| produced_witness)))
     }
 
     #[allow(clippy::too_many_arguments)]
