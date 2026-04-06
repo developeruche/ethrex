@@ -226,6 +226,7 @@ pub async fn start_test_api() -> tokio::task::JoinHandle<()> {
     let http_addr: SocketAddr = "127.0.0.1:8500".parse().unwrap();
     let ws_addr: SocketAddr = "127.0.0.1:8546".parse().unwrap();
     let authrpc_addr: SocketAddr = "127.0.0.1:8501".parse().unwrap();
+    let zkengine_addr: SocketAddr = "127.0.0.1:8502".parse().unwrap();
     let mut storage =
         Store::new("", EngineType::InMemory).expect("Failed to create in-memory storage");
     storage
@@ -241,6 +242,7 @@ pub async fn start_test_api() -> tokio::task::JoinHandle<()> {
             http_addr,
             Some(ws_addr),
             authrpc_addr,
+            zkengine_addr,
             storage.clone(),
             blockchain.clone(),
             jwt_secret,

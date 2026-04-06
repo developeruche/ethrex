@@ -248,6 +248,24 @@ pub struct Options {
         env = "ETHREX_AUTHRPC_JWTSECRET_PATH"
     )]
     pub authrpc_jwtsecret: String,
+    #[arg(
+        long = "zkengine.addr",
+        default_value = "127.0.0.1",
+        value_name = "ADDRESS",
+        help = "Listening address for the zkengine REST server.",
+        help_heading = "RPC options",
+        env = "ETHREX_ZKENGENE_ADDR"
+    )]
+    pub zkengine_addr: String,
+    #[arg(
+        long = "zkengine.port",
+        default_value = "8552",
+        value_name = "PORT",
+        help = "Listening port for the zkengine REST server.",
+        help_heading = "RPC options",
+        env = "ETHREX_ZKENGENE_PORT"
+    )]
+    pub zkengine_port: String,
     #[arg(long = "p2p.disabled", default_value = "false", value_name = "P2P_DISABLED", action = ArgAction::SetTrue, help_heading = "P2P options", env = "ETHREX_P2P_DISABLED")]
     pub p2p_disabled: bool,
     #[arg(
@@ -398,6 +416,8 @@ impl Options {
             metrics_port: "9090".to_string(),
             authrpc_addr: "localhost".to_string(),
             authrpc_jwtsecret: "jwt.hex".to_string(),
+            zkengine_addr: "127.0.0.1".to_string(),
+            zkengine_port: "8552".to_string(),
             p2p_port: "30303".into(),
             discovery_port: "30303".into(),
             discv4_enabled: true,
@@ -420,6 +440,8 @@ impl Options {
             authrpc_addr: "localhost".into(),
             authrpc_port: "8551".into(),
             authrpc_jwtsecret: "jwt.hex".into(),
+            zkengine_addr: "127.0.0.1".to_string(),
+            zkengine_port: "8552".to_string(),
             p2p_port: "30303".into(),
             discovery_port: "30303".into(),
             discv4_enabled: true,
@@ -444,6 +466,8 @@ impl Default for Options {
             authrpc_addr: Default::default(),
             authrpc_port: Default::default(),
             authrpc_jwtsecret: Default::default(),
+            zkengine_addr: "127.0.0.1".to_string(),
+            zkengine_port: "8552".to_string(),
             p2p_disabled: Default::default(),
             p2p_addr: None,
             p2p_port: Default::default(),
@@ -862,7 +886,7 @@ pub async fn import_blocks(
             } else {
                 // We need to have the state of the latest 128 blocks
                 blockchain
-                .add_block_pipeline(block, None)
+                .add_block_pipeline(block, None, false)
                 .inspect_err(|err| match err {
                     // Block number 1's parent not found, the chain must not belong to the same network as the genesis file
                     ChainError::ParentNotFound if number == 1 => warn!("The chain file is not compatible with the genesis file. Are you sure you selected the correct network?"),
@@ -970,7 +994,7 @@ pub async fn import_blocks_bench(
                 .map_err(InvalidBlockError::InvalidBody)?;
 
             blockchain
-                .add_block_pipeline(block, None)
+                .add_block_pipeline(block, None, false)
                 .inspect_err(|err| match err {
                     // Block number 1's parent not found, the chain must not belong to the same network as the genesis file
                     ChainError::ParentNotFound if number == 1 => warn!("The chain file is not compatible with the genesis file. Are you sure you selected the correct network?"),

@@ -4,6 +4,7 @@ use ethrex_common::types::block_access_list::BlockAccessList;
 use ethrex_common::types::payload::PayloadBundle;
 use ethrex_common::types::requests::{EncodedRequests, compute_requests_hash};
 use ethrex_common::types::{Block, BlockBody, BlockHash, BlockNumber, Fork};
+use ethrex_common::types::block_execution_witness::ExecutionWitness;
 use ethrex_common::{H256, U256};
 use ethrex_p2p::sync::SyncMode;
 use ethrex_rlp::error::RLPDecodeError;
@@ -927,7 +928,7 @@ async fn handle_new_payload_v1_v2(
     Ok(payload_status)
 }
 
-async fn handle_new_payload_v3(
+pub(crate) async fn handle_new_payload_v3(
     payload: &ExecutionPayload,
     context: RpcApiContext,
     block: Block,
@@ -951,7 +952,7 @@ async fn handle_new_payload_v3(
     handle_new_payload_v1_v2(payload, block, context, bal).await
 }
 
-async fn handle_new_payload_v4(
+pub(crate) async fn handle_new_payload_v4(
     payload: &ExecutionPayload,
     context: RpcApiContext,
     block: Block,
@@ -983,7 +984,7 @@ fn validate_execution_requests(execution_requests: &[EncodedRequests]) -> Result
     Ok(())
 }
 
-fn get_block_from_payload(
+pub(crate) fn get_block_from_payload(
     payload: &ExecutionPayload,
     parent_beacon_block_root: Option<H256>,
     requests_hash: Option<H256>,
@@ -1015,10 +1016,11 @@ pub async fn add_block(
     ctx: &RpcApiContext,
     block: Block,
     bal: Option<BlockAccessList>,
-) -> Result<(), ChainError> {
+    compute_witness: bool,
+) -> Result<Option<ExecutionWitness>, ChainError> {
     let (notify_send, notify_recv) = oneshot::channel();
     ctx.block_worker_channel
-        .send((notify_send, block, bal))
+        .send((notify_send, block, bal, compute_witness))
         .map_err(|e| {
             ChainError::Custom(format!(
                 "failed to send block execution request to worker: {e}"
@@ -1053,7 +1055,10 @@ async fn try_execute_payload(
     // Execute and store the block
     debug!(%block_hash, %block_number, "Executing payload");
 
-    match add_block(context, block, bal).await {
+    let compute_witness = true;
+    let t_start = std::time::Instant::now();
+
+    match add_block(context, block, bal, compute_witness).await {
         Err(ChainError::ParentNotFound) => {
             // Start sync
             syncer.sync_to_head(block_hash);
@@ -1098,9 +1103,32 @@ async fn try_execute_payload(
             error!("{e} for block {block_hash}");
             Err(RpcErr::Internal(e.to_string()))
         }
-        Ok(()) => {
+        Ok(witness_opt) => {
             debug!("Block with hash {block_hash} executed and added to storage successfully");
-            Ok(PayloadStatus::valid_with_hash(block_hash))
+            
+            let t_exec = t_start.elapsed();
+            let mut payload_status = PayloadStatus::valid_with_hash(block_hash);
+            
+            if let Some(witness) = witness_opt {
+                let rpc_witness =
+                    ethrex_common::types::block_execution_witness::RpcExecutionWitness::try_from(witness)
+                        .expect("Failed to convert witness to rpc witness");
+                payload_status.witness_raw = Some(rpc_witness);
+                
+                tracing::info!(
+                    "[WITNESS_BENCH] Engine Execution+Witness: {:?} (Block {})",
+                    t_exec,
+                    block_number
+                );
+            } else {
+                tracing::info!(
+                    "[WITNESS_BENCH] Engine Execution Only (No Witness): {:?} (Block {})",
+                    t_exec,
+                    block_number
+                );
+            }
+            
+            Ok(payload_status)
         }
     }
 }

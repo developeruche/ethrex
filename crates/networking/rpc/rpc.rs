@@ -65,6 +65,7 @@ use ethrex_blockchain::Blockchain;
 use ethrex_blockchain::error::ChainError;
 use ethrex_common::types::Block;
 use ethrex_common::types::block_access_list::BlockAccessList;
+use ethrex_common::types::block_execution_witness::ExecutionWitness;
 use ethrex_metrics::rpc::{RpcOutcome, record_async_duration, record_rpc_outcome};
 use ethrex_p2p::peer_handler::PeerHandler;
 use ethrex_p2p::sync_manager::SyncManager;
@@ -180,9 +181,10 @@ pub enum RpcRequestWrapper {
 
 /// Channel message type for the block executor worker thread.
 type BlockWorkerMessage = (
-    oneshot::Sender<Result<(), ChainError>>,
+    oneshot::Sender<Result<Option<ExecutionWitness>, ChainError>>,
     Block,
     Option<BlockAccessList>,
+    bool,
 );
 
 /// This struct contains all the dependencies that RPC handlers need to process requests,
@@ -436,9 +438,9 @@ pub fn start_block_executor(blockchain: Arc<Blockchain>) -> UnboundedSender<Bloc
     std::thread::Builder::new()
         .name("block_executor".to_string())
         .spawn(move || {
-            while let Some((notify, block, bal)) = block_receiver.blocking_recv() {
+            while let Some((notify, block, bal, compute_witness)) = block_receiver.blocking_recv() {
                 let _ = notify
-                    .send(blockchain.add_block_pipeline(block, bal.as_ref()))
+                    .send(blockchain.add_block_pipeline(block, bal.as_ref(), compute_witness))
                     .inspect_err(|_| tracing::error!("failed to notify caller"));
             }
         })
@@ -488,6 +490,7 @@ pub async fn start_api(
     http_addr: SocketAddr,
     ws_addr: Option<SocketAddr>,
     authrpc_addr: SocketAddr,
+    zkengine_addr: SocketAddr,
     storage: Store,
     blockchain: Arc<Blockchain>,
     jwt_secret: Bytes,
@@ -594,6 +597,15 @@ pub async fn start_api(
         .into_future();
     info!("Starting Auth-RPC server at {authrpc_addr}");
 
+    let zkengine_router = crate::zkengine::server::router(service_context.clone());
+    let zkengine_listener = TcpListener::bind(zkengine_addr)
+        .await
+        .map_err(|error| RpcErr::Internal(error.to_string()))?;
+    let zkengine_server = axum::serve(zkengine_listener, zkengine_router)
+        .with_graceful_shutdown(shutdown_signal())
+        .into_future();
+    info!("Starting zkengine REST server at {zkengine_addr}");
+
     if let Some(address) = ws_addr {
         let ws_handler = |ws: WebSocketUpgrade, ctx| async {
             ws.on_upgrade(|socket| handle_websocket(socket, ctx))
@@ -610,10 +622,10 @@ pub async fn start_api(
             .into_future();
         info!("Starting WS server at {address}");
 
-        let _ = tokio::try_join!(authrpc_server, http_server, ws_server)
+        let _ = tokio::try_join!(authrpc_server, http_server, ws_server, zkengine_server)
             .inspect_err(|e| error!("Error shutting down servers: {e:?}"));
     } else {
-        let _ = tokio::try_join!(authrpc_server, http_server)
+        let _ = tokio::try_join!(authrpc_server, http_server, zkengine_server)
             .inspect_err(|e| error!("Error shutting down servers: {e:?}"));
     }
 

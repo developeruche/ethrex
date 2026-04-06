@@ -16,26 +16,26 @@ use ethrex_common::{
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPayload {
-    pub(crate) parent_hash: H256,
-    pub(crate) fee_recipient: Address,
-    pub(crate) state_root: H256,
-    pub(crate) receipts_root: H256,
-    pub(crate) logs_bloom: Bloom,
-    pub(crate) prev_randao: H256,
+    pub parent_hash: H256,
+    pub fee_recipient: Address,
+    pub state_root: H256,
+    pub receipts_root: H256,
+    pub logs_bloom: Bloom,
+    pub prev_randao: H256,
     #[serde(with = "serde_utils::u64::hex_str")]
     pub block_number: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
-    pub(crate) gas_limit: u64,
+    pub gas_limit: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
-    pub(crate) gas_used: u64,
+    pub gas_used: u64,
     #[serde(with = "serde_utils::u64::hex_str")]
     pub timestamp: u64,
     #[serde(with = "serde_utils::bytes")]
-    pub(crate) extra_data: Bytes,
+    pub extra_data: Bytes,
     #[serde(with = "serde_utils::u64::hex_str")]
-    pub(crate) base_fee_per_gas: u64,
+    pub base_fee_per_gas: u64,
     pub block_hash: H256,
-    pub(crate) transactions: Vec<EncodedTransaction>,
+    pub transactions: Vec<EncodedTransaction>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub withdrawals: Option<Vec<Withdrawal>>,
     // ExecutionPayloadV3 fields. Optional since we support V2 too
@@ -195,6 +195,10 @@ pub struct PayloadStatus {
     pub status: PayloadValidationStatus,
     pub latest_valid_hash: Option<H256>,
     pub validation_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub witness_raw: Option<ethrex_common::types::block_execution_witness::RpcExecutionWitness>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -214,6 +218,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: Some(latest_valid_hash),
             validation_error: Some(error),
+            witness: None,
+            witness_raw: None,
         }
     }
 
@@ -223,6 +229,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: None,
             validation_error: Some(error.to_string()),
+            witness: None,
+            witness_raw: None,
         }
     }
 
@@ -232,6 +240,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Invalid,
             latest_valid_hash: Some(hash),
             validation_error: None,
+            witness: None,
+            witness_raw: None,
         }
     }
 
@@ -241,6 +251,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Syncing,
             latest_valid_hash: None,
             validation_error: None,
+            witness: None,
+            witness_raw: None,
         }
     }
 
@@ -250,6 +262,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Valid,
             latest_valid_hash: Some(hash),
             validation_error: None,
+            witness: None,
+            witness_raw: None,
         }
     }
     /// Creates a PayloadStatus with valid status and latest valid hash
@@ -258,6 +272,8 @@ impl PayloadStatus {
             status: PayloadValidationStatus::Valid,
             latest_valid_hash: None,
             validation_error: None,
+            witness: None,
+            witness_raw: None,
         }
     }
 }
