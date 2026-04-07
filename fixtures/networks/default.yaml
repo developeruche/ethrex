@@ -115,6 +115,7 @@ participants:
     cl_image: lighthouse:local
     el_extra_params:
       - "--builder.gas-limit=720000000000"
+      - "--precompute-witnesses"
     validator_count: 32
     count: 1
 network_params:
